@@ -1975,6 +1975,10 @@ class Installer(object):
             # add lvm2 package to install list
             self._add_packages_to_install('lvm2')
 
+        # add btrfs-progs if any partition uses btrfs
+        if any(p.get('filesystem') == 'btrfs' for p in partitions):
+            self._add_packages_to_install('btrfs-progs')
+
         # Create partitions_data (needed for mk-setup-grub.sh)
         for partition in partitions:
             if 'mountpoint' in partition and not partition.get('shadow', False):
