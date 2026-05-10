@@ -1,7 +1,6 @@
 name: photon-os-installer CI on VCF
 
 on:
-  push:
   workflow_dispatch:
 
 env:
