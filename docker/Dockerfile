@@ -10,8 +10,6 @@
 # base stage
 ARG DOCKER_PROXY
 FROM ${DOCKER_PROXY}library/photon:5.0 AS base
-RUN tdnf-config edit photon-snapshot enabled=1 && \
-    tdnf-config edit photon-updates enabled=0
 
 # stage to clone poi
 ARG DOCKER_PROXY
