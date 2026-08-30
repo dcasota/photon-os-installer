@@ -26,6 +26,29 @@ jobs:
               rm -r "$VENV_DIR"
               exit $STATUS
 
+    dialog-tests:
+        runs-on: self-hosted
+        steps:
+          - name: Checkout code
+            uses: actions/checkout@v3
+
+          - name: Run interactive installer dialog tests
+            run: |
+              VENV_DIR="$(mktemp -d /var/tmp/venv.XXXXXX)"
+              # --without-pip + a --python-targeted install avoids relying on
+              # ensurepip's bundled wheels, which aren't available for every
+              # python3 in this runner fleet.
+              python3 -m venv --without-pip "$VENV_DIR"
+              # requirements.txt is needed too: the dialog code under test
+              # (photon_installer/commandutils.py, installer.py) imports
+              # requests/yaml/OpenSSL/jc transitively, even though the tests
+              # themselves never touch the network/disk/packages.
+              python3 -m pip --python "$VENV_DIR/bin/python3" install -r requirements.txt pytest pexpect --index-url https://packages.vcfd.broadcom.net/artifactory/api/pypi/pypi/simple/
+              "$VENV_DIR/bin/pytest" -x tests/test_iso_dialogs.py
+              STATUS=$?
+              rm -r "$VENV_DIR"
+              exit $STATUS
+
     build-container:
         runs-on: [ self-hosted, "docker:root" ]
         steps:
@@ -251,6 +274,7 @@ jobs:
             fail-fast: false
             matrix:
                 name: [minimal]
+                boot_mode: [efi, bios]
         steps:
             - name: Checkout code
               uses: actions/checkout@master
@@ -267,12 +291,13 @@ jobs:
             - name: build ISO
               env:
                   NAME: ${{ matrix.name }}
+                  BOOT_MODE: ${{ matrix.boot_mode }}
               run: |
                   POI_IMAGE_NAME=${POI_IMAGE_NAME_BASE}:${GITHUB_SHA::7}
                   VM_NAME_BASE=poi-iso-boot-${GITHUB_SHA::7}
-                  ISO_OVF=photon5-iso-boot-${GITHUB_SHA::7}.ovf
+                  ISO_OVF=photon5-iso-boot-${GITHUB_SHA::7}-${BOOT_MODE}.ovf
                   KS_FILE=${NAME}_ks.yaml
-                  VM_NAME=${VM_NAME_BASE}-${NAME}
+                  VM_NAME=${VM_NAME_BASE}-${NAME}-${BOOT_MODE}
                   # used by pytest
                   export VC_IP=${{ vars.VC_IP }}
                   export VC_USER=${{ vars.VC_USER }}
@@ -287,12 +312,55 @@ jobs:
                   # create OVF that includes that ISO, and a blank hard disk
                   # base64 encode the ks file, must have no new lines (-w0)
                   KSDATA64=$(base64 -w0 < ${KS_FILE})
-                  docker run --rm -v$(pwd):/workdir ${POI_IMAGE_NAME} ova-compose -i iso_ova.yaml -o ${ISO_OVF} -m --param ksdata64=${KSDATA64}
+                  docker run --rm -v$(pwd):/workdir ${POI_IMAGE_NAME} ova-compose -i iso_ova.yaml -o ${ISO_OVF} -m --param ksdata64=${KSDATA64} --param boot_mode=${BOOT_MODE}
                   sudo chown -R $(id -u -n):$(id -g -n) .
                   popd
 
                   (cd poi-harness && echo "poi-harness sha is $(git rev-parse --short HEAD)")
-                  pytest ./poi-harness/ci/pytest/ -rs --deploy --ovf examples/iso/${ISO_OVF} --name ${VM_NAME} --ks_config examples/iso/${KS_FILE} --ova_config examples/iso/iso_ova.yaml --param ksdata64=${KSDATA64}
+                  pytest ./poi-harness/ci/pytest/ -rs --deploy --ovf examples/iso/${ISO_OVF} --name ${VM_NAME} --ks_config examples/iso/${KS_FILE} --ova_config examples/iso/iso_ova.yaml --param ksdata64=${KSDATA64} --param boot_mode=${BOOT_MODE}
+
+    update-cayman-poi-master:
+        runs-on: self-hosted
+        needs:
+            - cayman_poi
+            - ova-poi-harness
+            - iso-poi-harness
+        if: github.ref_name == 'master'
+        steps:
+            - name: Checkout Cayman POI
+              uses: actions/checkout@v3
+              with:
+                  repository: vcf/cayman-poi
+                  ref: vmware-master
+                  path: ./cayman-poi
+                  submodules: "true"
+                  fetch-depth: 0
+                  ssh-key: ${{ secrets.POI_CICD_SSH_KEY }}
+                  ssh-strict: "false"
+
+            - name: update poi/src and push to vmware-master
+              run: |
+                  cd ./cayman-poi
+                  git config --global user.email "poi-cd@broadcom.com"
+                  git config --global user.name "POI CI/CD"
+
+                  pushd poi/src
+
+                  # sometimes the sha is not available yet
+                  git fetch
+
+                  git checkout ${GITHUB_SHA::7}
+                  popd
+
+                  git add poi/src
+
+                  # Only commit if there are changes
+                  if git diff --cached --quiet; then
+                      echo "No changes to commit, skipping commit step"
+                  else
+                      git commit -m "update poi/src to ${GITHUB_SHA::7}"
+                      git push origin vmware-master
+                  fi
 
     github-public:
         runs-on: self-hosted

@@ -62,7 +62,7 @@ RUN echo '%__transaction_unshare %{nil}' >> /etc/rpm/macros.unshare && \
     tdnf ${TDNF_OPTIONS} -y install \
     zlib tar \
     gzip cpio \
-    util-linux coreutils findutils gawk binutils cdrkit \
+    util-linux coreutils findutils gawk binutils file xorriso \
     gptfdisk grub2 \
     e2fsprogs btrfs-progs xfsprogs kpartx lvm2 dosfstools \
     createrepo rpm jq jc \
@@ -70,6 +70,8 @@ RUN echo '%__transaction_unshare %{nil}' >> /etc/rpm/macros.unshare && \
     python3-rpm \
     qemu-img \
     open-vmdk \
+    squashfs-tools \
+    erofs-utils \
     stig-hardening \
     mkpasswd \
     $([ "${TARGETARCH}" == "amd64" ] && echo grub2-pc) && \
@@ -88,8 +90,9 @@ COPY \
      create-azure \
      create-cherrypicks-repo \
      create-pkg \
-     poi-pkglist yjson \
-     /usr/bin
+     poi-pkglist \
+     yjson \
+     /usr/bin/
 
 VOLUME /repo /workdir
 

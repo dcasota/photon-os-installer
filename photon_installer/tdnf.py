@@ -28,14 +28,6 @@ class TdnfBinaryNotUsableError(TdnfError):
     pass
 
 
-class TdnfCommandError(TdnfError):
-    """Raised when a tdnf command fails"""
-    def __init__(self, message, return_code=None, command=None):
-        super().__init__(message)
-        self.return_code = return_code
-        self.command = command
-
-
 def create_repo_conf(repos, reposdir="/etc/yum.repos.d", insecure=False, skip_md_extras=True):
     """
     Create .repo file as per configurations passed.
@@ -168,7 +160,7 @@ class Tdnf:
             if retval != 0:
                 self.logger.info(f"Command failed: {args}")
                 self.logger.error(err.decode('utf-8', errors='replace'))
-                if 'Error' in out_json:
+                if out_json and 'Error' in out_json:
                     self.logger.info(f"Error code: {out_json['Error']}")
                 if out_json and 'ErrorMessage' in out_json:
                     self.logger.error(out_json['ErrorMessage'])
@@ -177,7 +169,19 @@ class Tdnf:
 
             return retval, out_json
         else:
-            return subprocess.check_call(args)
+            # Capture output and route it to the log instead of inheriting the
+            # parent's stdout/stderr. During a UI (curses) install the latter
+            # overlays the progress bar with tdnf/rpm messages such as file
+            # paths (e.g. /etc/os-release).
+            process = subprocess.Popen(
+                args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+            )
+            for line in process.stdout:
+                self.logger.info(line.decode('utf-8', errors='replace').rstrip())
+            retval = process.wait()
+            if retval != 0:
+                raise subprocess.CalledProcessError(retval, args)
+            return retval
 
     def run(self, args=None, do_json=True):
         # Fix mutable default arguments issue
@@ -186,13 +190,3 @@ class Tdnf:
 
         command = self.get_command(args, do_json=do_json)
         return self.execute(command, do_json=do_json)
-
-
-def main():
-    tdnf = Tdnf(installroot="/installroot", releasever="5.0")
-    retval, out_json = tdnf.run(["repolist"])
-    print(json.dumps(out_json, indent=4))
-
-
-if __name__ == "__main__":
-    main()

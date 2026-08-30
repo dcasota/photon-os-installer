@@ -25,7 +25,6 @@ from OpenSSL.crypto import FILETYPE_PEM, load_certificate
 class CommandUtils(object):
     def __init__(self, logger):
         self.logger = logger
-        self.hostRpmIsNotUsable = -1
 
     def _update_environment_from_file(self, env_file_path):
         """Update environment variables from a temporary file."""
@@ -133,10 +132,12 @@ class CommandUtils(object):
     @staticmethod
     def is_vmware_virtualization():
         """Detect vmware vm"""
-        process = subprocess.Popen(["systemd-detect-virt"], stdout=subprocess.PIPE)
-        out, err = process.communicate()
-        if err is not None and err != 0:
-            return False
+        try:
+            out = subprocess.check_output(["systemd-detect-virt"])
+        except subprocess.CalledProcessError as e:
+            # systemd-detect-virt exits 1 (with "none" on stdout) when no
+            # virtualization is detected; that's not a failure, so use its output.
+            out = e.output
         return out.decode() == "vmware\n"
 
     @staticmethod
@@ -245,33 +246,6 @@ class CommandUtils(object):
 
         return True, None
 
-    def checkIfHostRpmNotUsable(self):
-        if self.hostRpmIsNotUsable >= 0:
-            return self.hostRpmIsNotUsable
-
-        # if rpm doesn't have zstd support
-        # if host rpm doesn't support sqlite backend db
-        cmds = [
-            "rpm --showrc | grep -qw 'rpmlib(PayloadIsZstd)'",
-            "rpm -E %{_db_backend} | grep -qw 'sqlite'",
-        ]
-
-        for cmd in cmds:
-            if self.run(cmd):
-                self.hostRpmIsNotUsable = 1
-                break
-
-        if self.hostRpmIsNotUsable < 0:
-            self.hostRpmIsNotUsable = 0
-
-        return self.hostRpmIsNotUsable
-
-    @staticmethod
-    def jsonread(filename):
-        with open(filename) as f:
-            data = json.load(f)
-            return data
-
     @staticmethod
     def _yaml_param(loader, node):
         params = loader.app_params
@@ -344,12 +318,6 @@ class CommandUtils(object):
             retval = e.args[0]
         self.logger.info(f"VG's list {vg_list}")
         return retval, vg_list
-
-    @staticmethod
-    def write_pkg_list_file(file_path, packages_list):
-        with open(file_path, "w") as json_file:
-            json.dump(packages_list, json_file, indent=4)
-        return file_path
 
     def replace_in_file(self, file_path, pattern, replacement, errors="ignore"):
         try:

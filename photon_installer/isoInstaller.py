@@ -7,6 +7,7 @@
 #
 
 import base64
+import json
 import os
 import shlex
 import subprocess
@@ -18,7 +19,6 @@ from commandutils import CommandUtils
 from defaults import Defaults
 from device import Device
 from installer import Installer
-from jsonwrapper import JsonWrapper
 
 
 class IsoInstaller(object):
@@ -68,8 +68,7 @@ class IsoInstaller(object):
             if self.media_mount_path:
                 repo_paths = self.media_mount_path + "/RPMS"
             else:
-                print("Please specify RPM repo path.")
-                return
+                raise Exception("Please specify RPM repo path.")
 
         if ks_path:
             if ks_path.startswith("http://") and not insecure_installation:
@@ -79,15 +78,20 @@ class IsoInstaller(object):
         else:
             install_config = self._load_ks_config_platform(verify=not insecure_installation)
 
-        # 'live' should be True for iso installs
-        if 'live' not in install_config:
+        # 'live' should be True for iso installs. Only stamp it on an actual
+        # (non-empty) kickstart config. For an interactive install the config
+        # is empty here and must stay falsy, otherwise installer.configure()
+        # ('if not install_config and ui_config') skips the UI configurator
+        # and _check_install_config() fails with "No disk configured".
+        if install_config and 'live' not in install_config:
             install_config['live'] = True
 
         if insecure_installation and install_config is not None:
             install_config['insecure_repo'] = True
 
         if options.ui_config_file:
-            ui_config = (JsonWrapper(options.ui_config_file)).read()
+            with open(options.ui_config_file) as f:
+                ui_config = json.load(f)
         else:
             ui_config = {}
         ui_config['options_file'] = options.options_file
@@ -114,7 +118,7 @@ class IsoInstaller(object):
         wait = 1
         while True:
             try:
-                response = requests.get(url, timeout=3, verify=verify)
+                response = requests.get(url, timeout=timeout, verify=verify)
                 response.raise_for_status()
                 break
             except Exception as e:
@@ -164,7 +168,10 @@ class IsoInstaller(object):
         if CommandUtils.is_vmware_virtualization():
             return self._load_ks_config_vmware(verify=verify)
         else:
-            return None
+            # No platform-provided kickstart: fall back to an interactive
+            # install with an empty config. Returning None here makes the
+            # caller crash at "if 'live' not in install_config".
+            return {}
 
     def _load_ks_config_vmware(self, verify=True):
         try:
@@ -191,6 +198,10 @@ class IsoInstaller(object):
             print(
                 f"Failed to run vmtoolsd, do you have open-vm-tools installed? Error: {e}"
             )
+        # No guestinfo kickstart (data/url both absent) or vmtoolsd missing:
+        # fall back to an interactive install with an empty config instead of
+        # returning None, which would crash at "if 'live' not in install_config".
+        return {}
 
     def mount_media(self, photon_media, mount_path=Defaults.MOUNT_PATH):
         """Mount the external media"""

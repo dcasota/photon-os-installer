@@ -215,6 +215,8 @@ class Installer(object):
         self._add_defaults(install_config)
         self._execute_external_plugins(modules.commons.ADD_DEFAULTS)
 
+        self._convert_partition_options()
+
         self.tdnf = tdnf.Tdnf(logger=self.logger,
                               config_file=self.tdnf_conf_path,
                               arch=install_config['arch'],
@@ -231,6 +233,43 @@ class Installer(object):
         self._check_disk_space()
         self._get_vg_names()
         self._clear_vgs()
+
+    def _convert_partition_options(self):
+        def _convert_options(partition, key, sep=","):
+            if key in partition:
+                if type(partition[key]) is str:
+                    partition[key] = partition[key].split(sep)
+                elif type(partition[key]) is not list:
+                    self.logger.error(f"{key} must be of type str or list")
+                    self.exit_gracefully()
+
+        def _process_partition(partition):
+            _convert_options(partition, 'fs_options', sep=",")
+            _convert_options(partition, 'mkfs_options', sep=",")
+
+            if 'mkfs_options' in partition:
+                options = []
+                for opt in partition['mkfs_options']:
+                    opt = opt.strip()
+                    if opt.startswith("-O"):
+                        opt = opt[2:].strip()
+                    if opt:
+                        options.append(opt)
+
+                if options:
+                    partition['mkfs_options'] = options
+                else:
+                    del partition['mkfs_options']
+
+            if 'btrfs' in partition and 'subvols' in partition['btrfs']:
+                for subvol in partition['btrfs']['subvols']:
+                    _process_partition(subvol)
+            elif 'subvols' in partition:
+                for subvol in partition['subvols']:
+                    _process_partition(subvol)
+
+        for partition in self.install_config['partitions']:
+            _process_partition(partition)
 
     # collect LVM Volume Group names
     def _get_vg_names(self):
@@ -417,15 +456,18 @@ class Installer(object):
         if 'docker' in install_config:
             packages.append("docker")
 
-        if 'security' in install_config:
-            security = install_config['security']
-            # the mere mention will add these packages, even if disabled or False,
-            # unless set to None
-            # use case: prepare for selinux/fips, but configure it later
-            if 'selinux' in security and security['selinux'] is not None:
-                packages.append("selinux-policy")
-            if 'fips' in security and security['fips'] is not None:
-                packages.append("openssl-fips-provider")
+        if 'security' not in install_config:
+            # Inject a default 'security' section with default selinux settings
+            install_config['security'] = {'selinux': Defaults.SELINUX_DEFAULT}
+
+        security = install_config['security']
+        # the mere mention will add these packages, even if disabled or False,
+        # unless set to None
+        # use case: prepare for selinux/fips, but configure it later
+        if 'selinux' in security and security['selinux'] is not None:
+            packages.append("selinux-policy")
+        if 'fips' in security and security['fips'] is not None:
+            packages.append("openssl-fips-provider")
 
         packages = list(set(packages))
 
@@ -702,8 +744,8 @@ class Installer(object):
 
         if 'security' in install_config:
             security = install_config['security']
-            if security.get('selinux', None) is not None:
-                if security['selinux'] not in ["enforcing", "permissive", "disabled"]:
+            if 'selinux' in security:
+                if security['selinux'] not in ["enforcing", "permissive", "disabled", None]:
                     raise InstallerConfigError("selinux must be enforcing, permissive, disabled or null")
             if security.get('fips', None) is not None:
                 if not isinstance(security['fips'], bool):
@@ -903,7 +945,7 @@ class Installer(object):
                 self.window.content_window().getch()
 
             self._cleanup_install_repo()
-            self._unmount_all()
+            self._unmount_all(success=False)
         raise InstallerError("Installer failed")
 
     def _setup_network(self):
@@ -1047,6 +1089,8 @@ class Installer(object):
         manifest['install_config'] = self.install_config
 
         retval, pkg_list = self.tdnf.run(["list", "--installed", "--disablerepo=*"])
+        if retval != 0:
+            self.logger.error(f"Failed to list installed packages for manifest (exit code: {retval})")
         manifest['packages'] = pkg_list
 
         with open(os.path.join(self.photon_root, "etc/fstab"), "rt") as f:
@@ -1072,14 +1116,6 @@ class Installer(object):
 
         with open(mf_file, "wt") as f:
             f.write(json.dumps(manifest))
-
-        # write a copy to the image itself
-        mf_dir = os.path.join(self.photon_root, "var", "log", "poi")
-        os.makedirs(mf_dir, exist_ok=True)
-        mf_file = os.path.join(mf_dir, "manifest.json")
-        with open(mf_file, "wt") as f:
-            f.write(json.dumps(manifest))
-        subprocess.run(["gzip", mf_file])
 
     def _create_archive(self):
         if 'archives' not in self.install_config:
@@ -1109,19 +1145,42 @@ class Installer(object):
                 self.exit_gracefully()
             self.logger.info(f"Created archive {filename}")
 
-    def _unmount_all(self):
+    def _compress_filesystem(self):
+        """
+        Compress the squashfs or erofs filesystem to the target partition
+        """
+        for partition in self.install_config['partitions']:
+            if partition['filesystem'] == 'squashfs':
+                partition_path = partition['path']
+
+                squashfs_dir = os.path.join(self.working_directory, "squashfs_" + partition['mountpoint'].replace("/", "_"))
+                subprocess.run(["mksquashfs", squashfs_dir, partition_path, "-noappend", "-comp", "gzip"], check=True)
+                self.logger.info(f"compressed squashfs filesystem to {partition_path}")
+                shutil.rmtree(squashfs_dir)
+                self.logger.info(f"removed {squashfs_dir}")
+            elif partition['filesystem'] == 'erofs':
+                partition_path = partition['path']
+
+                erofs_dir = os.path.join(self.working_directory, "erofs_" + partition['mountpoint'].replace("/", "_"))
+                subprocess.run(["mkfs.erofs", partition_path, erofs_dir], check=True)
+                self.logger.info(f"compressed erofs filesystem to {partition_path}")
+                shutil.rmtree(erofs_dir)
+                self.logger.info(f"removed {erofs_dir}")
+
+    def _unmount_all(self, success=True):
         """
         Unmount partitions and special folders
         """
 
         partitions = self.install_config['partitions']
-        for p in partitions:
-            # only fstrim fs types that are supported to avoid error messages
-            # instead of filtering for the fs type we could use '--quiet-unsupported',
-            # but this is not implemented in older fstrim versions in Photon 3.0
-            if p['filesystem'] in ['ext4', 'btrfs', 'xfs'] and p['mountpoint'] is not None:
-                mntpoint = os.path.join(self.photon_root, p['mountpoint'].strip('/'))
-                retval = self.cmd.run(["fstrim", mntpoint])
+        if success:
+            for p in partitions:
+                # only fstrim fs types that are supported to avoid error messages
+                # instead of filtering for the fs type we could use '--quiet-unsupported',
+                # but this is not implemented in older fstrim versions in Photon 3.0
+                if p['filesystem'] in ['ext4', 'btrfs', 'xfs'] and p['mountpoint'] is not None:
+                    mntpoint = os.path.join(self.photon_root, p['mountpoint'].strip('/'))
+                    retval = self.cmd.run(["fstrim", mntpoint])
 
         if self.install_config.get('no_unmount', False):
             return
@@ -1136,6 +1195,11 @@ class Installer(object):
         if os.path.exists(self.photon_root):
             shutil.rmtree(self.photon_root)
 
+        if success:
+            # must be done after all partitions are unmounted,
+            # but before loop devices are unmapped
+            self._compress_filesystem()
+
         # Deactivate LVM VGs
         for vg in self.lvs_to_detach['vgs']:
             retval = self.cmd.run(["vgchange", "-v", "-an", vg])
@@ -1149,11 +1213,11 @@ class Installer(object):
                 self.logger.error(f"Failed to detach LVM physical volume: {pv}")
 
         # Get the disks from partition table
-        disk_ids = set(partition['disk_id'] for partition in self.install_config['partitions'])
+        disk_ids = set(partition['disk_id'] for partition in partitions)
         for disk_id in disk_ids:
             device = self.install_config['disks'][disk_id]['device']
             if 'loop' in device:
-                # Uninitialize device paritions mapping
+                # Uninitialize device partitions mapping
                 retval = self.cmd.run(['kpartx', '-d', device])
                 if retval != 0:
                     # don't raise an exception so we can continue with remaining devices
@@ -1170,12 +1234,6 @@ class Installer(object):
     def _get_partuuid(self, path):
         partuuid = subprocess.check_output(['blkid', '-s', 'PARTUUID', '-o', 'value', path],
                                            universal_newlines=True).rstrip('\n')
-        # Backup way to get uuid/partuuid. Leave it here for later use.
-        # if partuuidval == '':
-        #    sgdiskout = Utils.runshellcommand(
-        #        "sgdisk -i 2 {} ".format(disk_device))
-        #    partuuidval = (re.findall(r'Partition unique GUID.*',
-        #                          sgdiskout))[0].split(':')[1].strip(' ').lower()
         return partuuid
 
     def _get_uuid(self, path):
@@ -1193,12 +1251,11 @@ class Installer(object):
             if "subvols" in subvol:
                 self._add_btrfs_subvolume_to_fstab(mnt_src, fstab_file, subvol, os.path.join(parent_subvol, subvol['name']))
 
-    def _create_fstab(self, fstab_path=None):
+    def _create_fstab(self):
         """
         update fstab
         """
-        if not fstab_path:
-            fstab_path = os.path.join(self.photon_root, "etc/fstab")
+        fstab_path = os.path.join(self.photon_root, "etc/fstab")
         with open(fstab_path, "w") as fstab_file:
             fstab_file.write("#system\tmnt-pt\ttype\toptions\tdump\tfsck\n")
 
@@ -1212,17 +1269,16 @@ class Installer(object):
                 options = 'defaults'
                 dump = 1
                 fsck = 2
+                if partition.get('filesystem', '') in ['squashfs', 'erofs'] or ptype == PartitionType.SWAP:
+                    dump = 0
+                    fsck = 0
+                elif partition.get('mountpoint', '') == '/':
+                    fsck = 1
 
                 if 'fs_options' in partition:
-                    if type(partition['fs_options']) is str:
-                        options += f",{partition['fs_options']}"
-                    elif type(partition['fs_options']) is list:
-                        options += "," + ",".join(partition['fs_options'])
-                    else:
-                        self.logger.error("fs_options must be of type str or list")
-                        self.exit_gracefully()
+                    options += "," + ",".join(partition['fs_options'])
 
-                if partition.get('readonly', False):
+                if partition.get('readonly', False) or partition.get('filesystem', '') in ['squashfs', 'erofs']:
                     # we already specify 'noatime' below
                     options += ",ro"
 
@@ -1233,17 +1289,14 @@ class Installer(object):
                         options += ',barrier,noatime,data=ordered'
                     elif part_fstype == 'btrfs':
                         options += ',barrier,noatime'
-                    elif part_fstype == 'xfs':
+                    elif part_fstype in ['xfs', 'squashfs', 'erofs']:
                         pass
                     else:
                         self.logger.error(f"Filesystem type not supported: {part_fstype}")
                         self.exit_gracefully()
-                    fsck = 1
 
                 if ptype == PartitionType.SWAP:
                     mountpoint = 'swap'
-                    dump = 0
-                    fsck = 0
                 else:
                     mountpoint = partition['mountpoint']
 
@@ -1356,13 +1409,19 @@ class Installer(object):
 
             mntpoint = os.path.join(self.photon_root, partition['mountpoint'].strip('/'))
             if not partition.get('no_build_mount', False):
-                options = None
-                if 'fs_options' in partition:
-                    if type(partition['fs_options']) is str:
-                        options = partition['fs_options'].split(",")
-                    elif type(partition['fs_options']) is list:
+                if partition['filesystem'] == 'squashfs':
+                    squashfs_dir = os.path.join(self.working_directory, "squashfs_" + partition['mountpoint'].replace("/", "_"))
+                    os.makedirs(squashfs_dir, exist_ok=True)
+                    self._mount(squashfs_dir, partition['mountpoint'], bind=True, create=True)
+                elif partition['filesystem'] == 'erofs':
+                    erofs_dir = os.path.join(self.working_directory, "erofs_" + partition['mountpoint'].replace("/", "_"))
+                    os.makedirs(erofs_dir, exist_ok=True)
+                    self._mount(erofs_dir, partition['mountpoint'], bind=True, create=True)
+                else:
+                    options = None
+                    if 'fs_options' in partition:
                         options = partition['fs_options']
-                self._mount(partition['path'], partition['mountpoint'], options=options, create=True)
+                    self._mount(partition['path'], partition['mountpoint'], options=options, create=True)
             else:
                 # we need the directory, even if we do not mount it
                 os.makedirs(mntpoint, exist_ok=True)
@@ -1544,13 +1603,11 @@ class Installer(object):
 
         # Check if file exists
         if not grub_cfg_file.exists():
-            self.logger.error(f"Error: grub.cfg file not found: {grub_cfg_path}")
-            return False
+            raise InstallerError(f"Error: grub.cfg file not found: {grub_cfg_path}")
 
         # Check if file is readable and writable
         if not os.access(grub_cfg_path, os.R_OK | os.W_OK):
-            self.logger.error(f"Error: Insufficient permissions to modify {grub_cfg_path}")
-            return False
+            raise InstallerError(f"Error: Insufficient permissions to modify {grub_cfg_path}")
 
         # Read the current grub.cfg content
         with open(grub_cfg_path, 'r') as f:
@@ -1585,8 +1642,7 @@ password_pbkdf2 {grub_user} {grub_password_hash}
                 insertion_point = menuentry_match.start()
                 new_content = content[:insertion_point] + password_lines + content[insertion_point:]
             else:
-                self.logger.error("Error: Could not find suitable insertion point in grub.cfg")
-                return False
+                raise InstallerError("Error: Could not find suitable insertion point in grub.cfg")
 
         # Write the modified content
         with open(grub_cfg_path, 'w') as f:
@@ -1602,14 +1658,11 @@ password_pbkdf2 {grub_user} {grub_password_hash}
         device = self.install_config['disks']['default']['device']
         # Setup bios grub
         if bootmode == 'dualboot' or bootmode == 'bios':
-            path = os.path.join(self.photon_root, "boot")
-            retval = self.cmd.run(f"grub2-install --target=i386-pc --force --boot-directory={path} {device}")
+            boot_path = os.path.join(self.photon_root, "boot")
+            efi_path = os.path.join(self.photon_root, "boot/efi")
+            retval = self.cmd.run(f"grub2-install --target=i386-pc --force --boot-directory={boot_path} --efi-directory={efi_path} {device}")
             if retval != 0:
-                retval = self.cmd.run(['grub-install', '--target=i386-pc', '--force',
-                                       f"--boot-directory={path}",
-                                       device])
-                if retval != 0:
-                    raise InstallerError("Unable to setup grub")
+                raise InstallerError("Unable to setup grub")
 
         # Setup efi grub
         if bootmode == 'dualboot' or bootmode == 'efi':
@@ -1617,7 +1670,12 @@ password_pbkdf2 {grub_user} {grub_password_hash}
 
             os.makedirs(os.path.join(self.photon_root, "boot/efi/boot/grub2"), exist_ok=True)
             with open(os.path.join(self.photon_root, 'boot/efi/boot/grub2/grub.cfg'), "w") as grub_cfg:
-                grub_cfg.write(f"search -n -u {self._get_uuid(self.install_config['partitions_data']['boot'])} -s\n")
+                uuid = self._get_uuid(self.install_config['partitions_data']['boot'])
+                if uuid:
+                    grub_cfg.write(f"search -n -u {uuid} -s\n")
+                else:
+                    # Fallback to searching by file if filesystem (like squashfs or erofs) has no UUID
+                    grub_cfg.write(f"search -n -f {self.install_config['partitions_data']['bootdirectory']}grub2/grub.cfg -s\n")
                 grub_cfg.write(f"set prefix=($root){self.install_config['partitions_data']['bootdirectory']}grub2\n")
                 grub_cfg.write(f"configfile {self.install_config['partitions_data']['bootdirectory']}grub2/grub.cfg\n")
 
@@ -1697,6 +1755,17 @@ password_pbkdf2 {grub_user} {grub_password_hash}
                     self.logger.error(f"Error executing {func_name} in plugin {plugin_name}: {e}")
                     raise InstallerError(f"Plugin {plugin_name} failed during {func_name}: {e}")
 
+    # The only phases _execute_modules is ever called with (see calls to
+    # _execute_modules below). A modules/m_*.py file whose install_phase is
+    # anything else (e.g. FINAL_CHECK/CHECK_CONFIG/ADD_DEFAULTS) can never
+    # match and would silently never execute; use an external plugin
+    # (photon_installer/plugins) for those phases instead.
+    MODULES_DISPATCHABLE_PHASES = (
+        modules.commons.PRE_INSTALL,
+        modules.commons.PRE_PKGS_INSTALL,
+        modules.commons.POST_INSTALL,
+    )
+
     def _execute_modules(self, phase):
         """
         Execute the scripts in the modules folder
@@ -1719,6 +1788,13 @@ password_pbkdf2 {grub_user} {grub_password_hash}
             # check for the install phase
             if not hasattr(mod, 'install_phase'):
                 self.logger.error(f"Error: can not defind module {module} phase")
+                continue
+            if mod.install_phase not in self.MODULES_DISPATCHABLE_PHASES:
+                self.logger.warning(
+                    f"module {module} has install_phase '{mod.install_phase}', which "
+                    f"_execute_modules never dispatches (only {self.MODULES_DISPATCHABLE_PHASES} "
+                    "are); this module will never execute"
+                )
                 continue
             if mod.install_phase != phase:
                 self.logger.info(f"Skipping module {module} for phase {phase}")
@@ -1894,31 +1970,33 @@ password_pbkdf2 {grub_user} {grub_password_hash}
             self.cmd.run(['eject', '-r'])
 
     def _setup_security(self):
-        if 'security' not in self.install_config:
-            return
-
         security = self.install_config['security']
-        if security.get('selinux', "disabled") in ["enforcing", "permissive"]:
-            self.poi_kernel_cmdline += " security=selinux selinux=1"
         if security.get('fips', False):
             self.poi_kernel_cmdline += " fips=1"
 
-        selinux = security.get('selinux', None)
-        if selinux is not None:
-            file_in = self.photon_root + "/etc/selinux/config"
-            file_out = self.photon_root + "/etc/selinux/config.tmp"
-            with open(file_in, "rt") as fin:
-                with open(file_out, "wt") as fout:
-                    found = False
-                    for line in fin:
-                        if line.startswith("SELINUX="):
-                            fout.write(f"SELINUX={selinux}\n")
-                            found = True
-                        else:
-                            fout.write(line)
-                    if not found:
-                        fout.write(f"SELINUX={selinux}\n")
-            os.rename(file_out, file_in)
+        selinux = security.get('selinux', Defaults.SELINUX_DEFAULT)
+        if selinux is None:
+            return  # selinux config is explicitly bypassed
+        elif selinux == "disabled":
+            self.poi_kernel_cmdline += " selinux=0"
+        else:
+            self.poi_kernel_cmdline += " security=selinux selinux=1 enforcing="
+            self.poi_kernel_cmdline += "1" if selinux == "enforcing" else "0"
+
+        file_in = self.photon_root + "/etc/selinux/config"
+        file_out = self.photon_root + "/etc/selinux/config.tmp"
+        with open(file_in, "rt") as fin, \
+                open(file_out, "wt") as fout:
+            found = False
+            for line in fin:
+                if line.startswith("SELINUX="):
+                    fout.write(f"SELINUX={selinux}\n")
+                    found = True
+                else:
+                    fout.write(line)
+            if not found:
+                fout.write(f"SELINUX={selinux}\n")
+        os.rename(file_out, file_in)
 
     def _enable_network_in_chroot(self):
         """
@@ -1934,7 +2012,7 @@ password_pbkdf2 {grub_user} {grub_password_hash}
         if os.path.exists(self.photon_root + '/etc/resolv.conf'):
             os.remove(self.photon_root + '/etc/resolv.conf')
 
-    def partition_compare(self, p):
+    def _partition_compare(self, p):
         if 'mountpoint' in p and p['mountpoint'] is not None:
             return (1, len(p['mountpoint']), p['mountpoint'])
         return (0, 0, "A")
@@ -2039,11 +2117,7 @@ password_pbkdf2 {grub_user} {grub_password_hash}
         If fs_options provided then append fs_options to given mount options.
         """
 
-        options = []
-        if type(fs_options) is str:
-            options = fs_options.split(",")
-        elif type(fs_options) is list:
-            options = fs_options
+        options = fs_options.copy() if fs_options else []
         options.append(f"subvol={os.path.join(parent_subvol, subvol_name)}")
         self._mount(disk, mountpoint, options=options, create=True)
 
@@ -2415,6 +2489,10 @@ password_pbkdf2 {grub_user} {grub_password_hash}
             # add lvm2 package to install list
             self._add_packages_to_install('lvm2')
 
+        # add btrfs-progs if any partition uses btrfs
+        if any(p.get('filesystem') == 'btrfs' for p in partitions):
+            self._add_packages_to_install('btrfs-progs')
+
         # Create partitions_data (needed for mk-setup-grub.sh)
         for partition in partitions:
             if 'mountpoint' in partition and not partition.get('shadow', False):
@@ -2431,7 +2509,7 @@ password_pbkdf2 {grub_user} {grub_password_hash}
 
         # Sort partitions by mountpoint to be able to mount and
         # unmount it in proper sequence
-        partitions.sort(key=lambda p: self.partition_compare(p))
+        partitions.sort(key=lambda p: self._partition_compare(p))
 
         self.install_config['partitions_data'] = partitions_data
 
@@ -2443,6 +2521,10 @@ password_pbkdf2 {grub_user} {grub_password_hash}
         for partition in partitions:
             # unformatted partition
             if partition['filesystem'] is None:
+                continue
+
+            # skip squashfs or erofs filesystem, will be copied later
+            if partition['filesystem'] in ['squashfs', 'erofs']:
                 continue
 
             ptype = self._get_partition_type(partition)
@@ -2459,8 +2541,9 @@ password_pbkdf2 {grub_user} {grub_password_hash}
                 mkfs_cmd.append("-f")
 
             if 'mkfs_options' in partition:
-                options = partition['mkfs_options'].split()
-                mkfs_cmd.extend(options)
+                options = partition['mkfs_options']
+                if options:
+                    mkfs_cmd.extend(["-O", ",".join(options)])
 
             # fs level label
             if partition.get('label') is not None:
