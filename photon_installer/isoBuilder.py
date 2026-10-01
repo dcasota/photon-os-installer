@@ -303,7 +303,9 @@ class IsoBuilder(object):
                 f"grub2-mkimage -O i386-pc-eltorito -d /usr/lib/grub/i386-pc "
                 f"-o {self.working_dir}/isolinux/eltorito.img -p /boot/grub2 "
                 f"biosdisk iso9660 normal search search_fs_uuid search_fs_file search_label "
-                f"all_video loadenv fat ext2 gfxmenu gfxterm gfxterm_background gfxterm_menu linux probe"
+                f"all_video loadenv fat ext2 gfxmenu gfxterm gfxterm_background gfxterm_menu linux probe "
+                # image loaders for the theme's png and tga files
+                f"png tga"
             )
 
         if self.kickstart_path:
