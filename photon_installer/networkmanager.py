@@ -271,6 +271,12 @@ class NetworkManager:
                 else:
                     sysdict['Network']['DHCP'] = 'no'
 
+        if iface_config.get('dhcp4', False):
+            identifier = iface_config.get('dhcp-identifier', 'mac')
+            if identifier not in ('mac', 'duid'):
+                raise Exception(f"dhcp-identifier of {if_id} must be 'mac' or 'duid', not {identifier!r}")
+            sysdict['DHCPv4'] = {'ClientIdentifier': identifier}
+
         sysdict['Network']['IPv6AcceptRA'] = \
             'yes' if iface_config.get('accept-ra', False) else 'no'
 
