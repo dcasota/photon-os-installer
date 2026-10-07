@@ -172,7 +172,8 @@ class Installer(object):
     """
     create, append and validate configuration date - install_config
     """
-    def configure(self, install_config, ui_config=None):
+    def configure(self, install_config, ui_config=None, defaults=None):
+        self.media_defaults = dict(defaults or {})
         # Initialize logger and cmd first
         if not install_config:
             # UI installation
@@ -398,6 +399,9 @@ class Installer(object):
         """
         Add default install_config settings if not specified
         """
+        for key, value in self.media_defaults.items():
+            install_config.setdefault(key, value)
+
         # set arch to host's one if not defined
         if install_config.get('arch', None) is None:
             arch = platform.machine()
