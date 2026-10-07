@@ -52,3 +52,6 @@ jobs:
       run: |
         pytest -x tests/test_iso_dialogs.py
 
+    - name: Run unit tests
+      run: |
+        pytest -x tests --ignore=tests/test_iso_dialogs.py
