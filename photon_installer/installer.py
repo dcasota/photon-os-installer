@@ -33,6 +33,7 @@ import modules.commons
 import tdnf
 from commandutils import CommandUtils
 from defaults import Defaults
+from dhcprelease import release_leases
 from logger import Logger
 from networkmanager import NetworkManager
 from progressbar import ProgressBar
@@ -172,7 +173,8 @@ class Installer(object):
     """
     create, append and validate configuration date - install_config
     """
-    def configure(self, install_config, ui_config=None):
+    def configure(self, install_config, ui_config=None, defaults=None):
+        self.media_defaults = dict(defaults or {})
         # Initialize logger and cmd first
         if not install_config:
             # UI installation
@@ -398,6 +400,9 @@ class Installer(object):
         """
         Add default install_config settings if not specified
         """
+        for key, value in self.media_defaults.items():
+            install_config.setdefault(key, value)
+
         # set arch to host's one if not defined
         if install_config.get('arch', None) is None:
             arch = platform.machine()
@@ -922,6 +927,7 @@ class Installer(object):
         self._execute_modules(modules.commons.POST_INSTALL)
         self._final_check()
         self._deactivate_network_in_chroot()
+        self._release_dhcp_leases()
         self._write_manifest()
         self._selinux_label()  # run after last possible file creation
         self._cleanup_install_repo()
@@ -1083,6 +1089,9 @@ class Installer(object):
         manifest = {}
 
         self.logger.info(f"writing manifest file {mf_file}")
+
+        if self.dhcp_release is not None:
+            manifest['dhcp_release'] = self.dhcp_release
 
         manifest['install_time'] = str(datetime.datetime.now())
 
@@ -1961,6 +1970,12 @@ password_pbkdf2 {grub_user} {grub_password_hash}
             if stderr:
                 self.logger.error(stderr.decode())
             self.exit_gracefully()
+
+    def _release_dhcp_leases(self):
+        """
+        Release the DHCP leases of the installer environment on live installs
+        """
+        self.dhcp_release = release_leases(self.logger) if self.install_config['live'] else None
 
     def _eject_cdrom(self):
         """

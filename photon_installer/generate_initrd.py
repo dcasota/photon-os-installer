@@ -138,7 +138,6 @@ class IsoInitrd:
             "/usr/bin/grub2-*",
             "/usr/bin/bsdcpio",
             "/usr/bin/bsdtar",
-            "/usr/bin/networkctl",
             "/usr/bin/machinectl",
             "/usr/bin/pkg-config",
             "/usr/bin/openssl",

@@ -78,13 +78,12 @@ class IsoInstaller(object):
         else:
             install_config = self._load_ks_config_platform(verify=not insecure_installation)
 
-        # 'live' should be True for iso installs. Only stamp it on an actual
-        # (non-empty) kickstart config. For an interactive install the config
-        # is empty here and must stay falsy, otherwise installer.configure()
-        # ('if not install_config and ui_config') skips the UI configurator
-        # and _check_install_config() fails with "No disk configured".
-        if install_config and 'live' not in install_config:
-            install_config['live'] = True
+        # defaults of an installation from this media; installer.configure()
+        # applies them to a kickstart and to the UI configuration alike
+        media_defaults = {
+            'live': True,
+            'bootmode': self._media_bootmode(),
+        }
 
         if insecure_installation and install_config is not None:
             install_config['insecure_repo'] = True
@@ -107,10 +106,17 @@ class IsoInstaller(object):
             installer = Installer(repo_paths=repo_paths, log_path="/var/log",
                                   photon_release_version=options.photon_release_version)
 
-            installer.configure(install_config, ui_config)
+            installer.configure(install_config, ui_config, media_defaults)
             installer.execute()
         except Exception as err:
             raise Exception(f"Failed with error: {err}")
+
+    def _media_bootmode(self):
+        """'efi' when this media was booted through UEFI or runs on aarch64,
+        'dualboot' otherwise."""
+        if os.path.exists('/sys/firmware/efi') or os.uname().machine == 'aarch64':
+            return 'efi'
+        return 'dualboot'
 
     def _load_ks_config_http(self, url, retries=5, timeout=3, verify=True):
         # Do 5 trials to get the kick start
