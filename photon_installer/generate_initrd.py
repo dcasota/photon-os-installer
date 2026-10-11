@@ -25,6 +25,21 @@ devtmpfs       /dev         devtmpfs mode=0755,nosuid 0   0
 # End /etc/fstab
 """
 
+INITRD_NETWORKD_DUID_CONF = "etc/systemd/networkd.conf.d/50-photon-installer-duid.conf"
+INITRD_NETWORKD_DUID = """[DHCPv6]
+DUIDType=link-layer
+"""
+
+INITRD_NETWORK_DIR = "etc/systemd/network"
+INITRD_SEND_RELEASE_DROPIN = "50-photon-installer-send-release.conf"
+INITRD_SEND_RELEASE = """[DHCPv4]
+ClientIdentifier=mac
+SendRelease=yes
+
+[DHCPv6]
+SendRelease=yes
+"""
+
 
 class IsoInitrd:
     def __init__(self, **kwargs):
@@ -138,7 +153,6 @@ class IsoInitrd:
             "/usr/bin/grub2-*",
             "/usr/bin/bsdcpio",
             "/usr/bin/bsdtar",
-            "/usr/bin/networkctl",
             "/usr/bin/machinectl",
             "/usr/bin/pkg-config",
             "/usr/bin/openssl",
@@ -201,6 +215,29 @@ class IsoInitrd:
         # do this after copying files above - self.initrd_files should have priority
         self.cmd_util.acquire_file_map(self.initrd_files, self.initrd_path)
 
+    def write_dhcp_client_identity(self):
+        path = os.path.join(self.initrd_path, INITRD_NETWORKD_DUID_CONF)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.chmod(os.path.dirname(path), 0o755)
+        with open(path, "w", encoding="utf-8") as conf:
+            conf.write(INITRD_NETWORKD_DUID)
+        os.chmod(path, 0o644)
+
+    def write_dhcp_send_release(self):
+        network_dir = os.path.join(self.initrd_path, INITRD_NETWORK_DIR)
+        if not os.path.isdir(network_dir):
+            return
+        for name in sorted(os.listdir(network_dir)):
+            if not name.endswith(".network"):
+                continue
+            dropin_dir = os.path.join(network_dir, f"{name}.d")
+            os.makedirs(dropin_dir, exist_ok=True)
+            os.chmod(dropin_dir, 0o755)
+            path = os.path.join(dropin_dir, INITRD_SEND_RELEASE_DROPIN)
+            with open(path, "w", encoding="utf-8") as conf:
+                conf.write(INITRD_SEND_RELEASE)
+            os.chmod(path, 0o644)
+
     def build_initrd(self):
         os.makedirs(self.initrd_path, exist_ok=True)
 
@@ -231,6 +268,9 @@ class IsoInitrd:
             f"{self.initrd_path}/etc/hostname", "w", encoding="utf-8"
         ) as hostname:
             hostname.write("photon-installer\n")
+
+        self.write_dhcp_client_identity()
+        self.write_dhcp_send_release()
 
         self.cmd_util.remove_files([f"{self.initrd_path}/var/cache/tdnf"])
         shutil.move(f"{self.initrd_path}/boot", self.working_dir)

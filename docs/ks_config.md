@@ -494,6 +494,10 @@ Used to configure the network.
 
       - _"dhcp6"_ : boolean, set to true or false
 
+      - _"dhcp-identifier"_ : "mac" or "duid", the DHCPv4 client identifier when
+    _"dhcp4"_ is true. Defaults to "mac", which the installer environment uses
+    as well, so the installed system asks the DHCP server as the same client.
+
       - _"accept-ra"_ : boolean, set to true or false. Whether to accept
     Router Advertisement for IPv6.
 
