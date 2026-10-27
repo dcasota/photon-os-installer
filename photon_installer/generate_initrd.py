@@ -115,6 +115,14 @@ class IsoInitrd:
         except subprocess.CalledProcessError as err:
             print(f"Error processing {file}: {err}")
 
+    def write_vconsole_conf(self):
+        # clean_up() removes /usr/share/keymaps, so systemd-vconsole-setup must
+        # keep the kernel's keymap instead of loading its compiled-in default.
+        with open(
+            f"{self.initrd_path}/etc/vconsole.conf", "w", encoding="utf-8"
+        ) as vconsole_conf:
+            vconsole_conf.write("KEYMAP=@kernel\n")
+
     def clean_up(self):
         exclusions = ["terminfo", "cracklib", "grub", "factory", "dbus-1", "ansible"]
         dir_to_list = ["usr/share", "usr/sbin"]
@@ -226,6 +234,8 @@ class IsoInitrd:
             f"{self.initrd_path}/etc/locale.conf", "w", encoding="utf-8"
         ) as locale_conf:
             locale_conf.write("LANG=en_US.UTF-8")
+
+        self.write_vconsole_conf()
 
         with open(
             f"{self.initrd_path}/etc/hostname", "w", encoding="utf-8"
